@@ -136,7 +136,7 @@ class DamperControl : public DamperBase
   void update();  // check command to see if position reset is necessary
   void setOpenFrac(const long openCount); // close, then set position
   void moveTowardClose(const long cmd); // move from position toward closed
-  long runToLatch(const bool open = false); // false to latch closed
+  long runToLatch(const bool open = false, const byte verbose=0); // false to latch closed
   //private:
   //DamperControlPrivates priv;
 };
