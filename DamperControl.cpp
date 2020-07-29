@@ -7,22 +7,32 @@
 
 //class DamperControlPrivates{};
 
-DamperControl::DamperControl(const int enablePin, const int relayPin, const int sensPin) : DamperBase(enablePin,relayPin,sensPin) {
-  move(false);
-
-  _msSweep = 9000; // time to sweep from open to closed (and vica-versa)
+void DamperControl::setDefaultParameters()
+{
+  _msSweep = 8300; // time to sweep from open to closed (and vica-versa)
   _msAccum = 0;  // current state, as accumulated sweep msec
   _msCmd = 0;  // current desired state (msec into opening sweep)
   _msHyst = 500;   // don't bother trying to move less than this much
-  _msBacklash = 200;  // about this many msec to start closing from opening
-  _msBacklashOpen = 1800;  // ms to start open sweep from closed and latched
-  _msLatch = 200;  // time after sweep to latch and detect latched state
+  _msBacklash = 500;  // about this many msec to start closing from opening
+  _msBacklashOpen = 2200;  // ms to start open sweep from closed and latched
+  _msLatch = 140;  // time after sweep to latch and detect latched state
 
   _latchThresh = 8;  // less than this many sens() counts when latched
   //_latchedOpen = 2; //100;  // sens counts when latched open
   //_latchedClosed = 1; //60;  // sens counts when latched closed
 
   _opening = false;  // previous motion direction, to see if we need backlash adjustment
+}
+
+DamperControl::DamperControl(const int enablePin, const int relayPin, const int sensPin)
+  : DamperBase(enablePin,relayPin,sensPin) {
+  begin();
+  move(false);
+  setDefaultParameters();
+}
+
+DamperControl::DamperControl() : DamperBase(12,11,A7) {
+  setDefaultParameters();
 }
 
 void printTab() { Serial.print('\t'); }
@@ -58,68 +68,90 @@ void printParams(const int S, const int Bo,const int latch, const int B,
   Serial.println(note);
 }
 
+int blend(const float g, const int a, const int b)
+{
+  return((int)(0.5f + (g*((float)b)) + ((1.0f-g)*((float)a))));
+}
+
 void DamperControl::updateCal(
 	    const float trainingGain,
 	    const int msPartialOpen,
 	    const int msPartialClose,
 	    const int msOpen,
-	    const int msClose)
+	    const int msClose,
+	    const byte verbose)
 {
-  // _msLatch is usually small (kind of negligible) and fairly measurable
-  // _msBacklash is also fairly small, and somewhat measurable by human experiment
-  // may want to assert that these are (mostly) correct for updates from underdetermined
-  // system
-
-  // Assert _msBacklash is small, and (nearly) correct.
-  float Bo = msOpen-msClose + _msBacklash;  // new estimate of _msBacklashOpen
+  // although msLatch is generally small, perhaps negligible, it is the
+  // only one of the 4 current calibration parameters which is readily measured.
 
   // estimate latch time.  Note that this is close to zero.
   // could be negative... check and warn
-  float latch = Bo + (msPartialClose - msPartialOpen - _msBacklash);
-  if (latch < 10.f)
+
+  // this is backlashOpen - backlash <~= backlashOpen
+  //            since backlash << backlashOpen
+  int Bo1 = msOpen - msClose;
+  if (verbose > 2)
+    {
+      Serial.print(F("% backlashOpen - backlash         = "));
+      Serial.println(Bo1);
+    }
+  
+  // this is backlashOpen - backlash - latch  == Bo1 - latch.
+  // since latch << backlashOpen, this is <~ Bo1
+  int Bo2 = msPartialOpen - msPartialClose;
+  if (verbose > 2)
+    {
+      Serial.print(F("% backlashOpen - backlash - latch = "));
+      Serial.println(Bo2);
+    }
+
+  int latch = Bo1 - Bo2;
+  if (verbose > 2)
+    {
+      Serial.print(F("% latch = "));
+      Serial.println(latch);
+    }
+  if (latch < 10)
     {
       Serial.print(F("%Low latch time estimate "));
       Serial.print(latch,1);
       Serial.println(F("ms.  Setting to minimum (10)"));
-      latch = 10.f;
+      latch = 10;
     }
 
-  // update _msBacklash estimate.
-  float B = Bo + (msClose - msOpen);
-  if (B < 50.f)
+  // just use old defiinition of backlash
+  //       (which is << backlashOpen, hence somewhat negligible)
+  // to estimate update of dominant backlashOpen
+  int Bo = Bo2 + _msBacklash + latch;
+
+  // update estimate of sweep time
+  int sweep = msOpen - Bo - latch;
+
+  // update backlash... to start close sweep after opening
+  //int B = Bo - latch - Bo2;  // redundant
+  //int B = msClose - sweep - latch;  // redundant
+  int B = msClose - _msSweep - latch;
+  if (B < 50)  // may not be necessary.  check math.  might be impossible to get negative?
     {
       Serial.print(F("%Low backlash time estimate "));
-      Serial.print(latch);
+      Serial.print(B,1);
       Serial.println(F("ms.  Setting to minimum (50)"));
-      B = 50.f;
+      B = 50;
     }
-
-  float So = msOpen - Bo - latch;
-  float Sc = msClose - B - latch;
-  Serial.print(F("%open  sweep est "));  Serial.println(So,1);
-  Serial.print(F("%close sweep est "));  Serial.println(Sc,1);
-  // time to close is more reliable than to open.  Open backlash is tricky.
-  // weicht toward close
-  float S = ( ((long)4) * ((long)Sc)+((long)So) ) / 5;
 
   Serial.println(F("% DamperControl Calibration Update :"));
   Serial.println(F("%sweep\ttoOpen\tlatch\tbacklash"));
   printParams(_msSweep,_msBacklashOpen,_msLatch,_msBacklash,F("current"));
-  printParams((int)S,(int)Bo,(int)latch,(int)B,F("estimated"));
-  
-  float invGain = 1.0f - trainingGain;
+  printParams(sweep,Bo,latch,B,F("estimated"));
 
-  _msBacklashOpen = (int)( (invGain * ((float)_msBacklashOpen)) + (trainingGain * Bo   ) );
-  _msSweep        = (int)( (invGain * ((float)_msSweep       )) + (trainingGain * S    ) );
-
-  // _msBacklash and _msLatch are (somewhat) measurable, but chaotic to estimate.
-  // slow their training a bit.
-  float g = 0.5 * trainingGain;
-  invGain = 1.0f - g;
-  _msBacklash = (int)( (invGain * ((float)_msBacklash)) + (g * B    ) );
-  _msLatch    = (int)( (invGain * ((float)_msLatch   )) + (g * latch) );
-  
-  printParams(_msSweep,_msBacklashOpen,_msLatch,_msBacklash,F("updated"));
+  if (trainingGain > 0.0f)
+    {
+      _msBacklashOpen = blend(trainingGain,_msBacklashOpen, Bo);
+      _msBacklash     = blend(trainingGain,_msBacklash    , B );
+      _msLatch        = blend(trainingGain,_msLatch, latch);
+      _msSweep        = blend(trainingGain,_msSweep, sweep);
+      printParams(_msSweep,_msBacklashOpen,_msLatch,_msBacklash,F("updated"));
+    }
 }
 
 /*
@@ -151,14 +183,35 @@ long sweepTimeUpdate(const __FlashStringHelper *msg,
 }
 */
 
+// OVERRIDE ENCAPSULATION : use low-level calls to open known ms.
+void DamperControl::forcePartialOpen(const int ms)
+{
+  move(false);
+  delay(100);
+  setOpen(true);
+  delay(100);
+  move(true);
+  delay(ms);
+  move(false);  // also calls setOpen(false) to keep relay in "normal" position
+}
+
 void DamperControl::init()  // re-initialize unit, in closed position
 {
   Serial.println(F("Make sure closed before starting"));
+  //forcePartialOpen(2*_msBacklashOpen);
   runToLatch(false,3);  // close
 
   // should be closed now.
   _msAccum = _msCmd = 0;
   _opening = false;
+}
+void DamperControl::init(const int enablePin, const int relayPin, const int sensPin)
+{
+  _pinEnable = enablePin;
+  _pinSwitch = relayPin;
+  _pinSens = sensPin;
+  begin();
+  init();
 }
 
 // run calibration tests, and update parameters
@@ -167,33 +220,45 @@ void DamperControl::calibrate(const float trainingGain)
   // timing test results
   int msPartialOpen, msPartialClose, msOpen, msClose;
 
-  init();  // make sure closed and reset
 
-  msPartialOpen = _msBacklashOpen + _msSweep/3;
+  // low-level calls to make sure we are at least partially open before re-init.
+  // I worry that latching closed twice may not be the same state
+  // as latching closed from open, so make sure its a little open first.
+  runToLatch(true,3);  // make sure open, timeout OK
+  msClose = runToLatch(false,3);  // make sure closed and reset (verbose)
+  // don't use this msClose, it is unreliable when runToLatch is verbose
+  
+  msPartialOpen = _msBacklashOpen + _msSweep/2;
   Serial.print(F("% measure time to open part-way ("));
   Serial.print(msPartialOpen);
   Serial.println(F("ms), then close"));
+  forcePartialOpen(msPartialOpen);
 
-  // OVERRIDE ENCAPSULATION : use low-level calls to open known ms.
-  setOpen(true);
-  delay(100);
-  move(true);
-  delay(msPartialOpen);
-  move(false);
-  delay(100);
-  setOpen(false);
+  Serial.println(F("%re-home (closed)"));
+  delay(500);
+  msPartialClose = runToLatch(false,0);
 
-  Serial.println(F("%re-close to latch"));
+  Serial.print(F("% open("));
+  Serial.print(msPartialOpen);
+  Serial.print(F(")\tclose("));
+  Serial.print(msPartialClose);
+  Serial.print(F(")  difference : "));
+  Serial.println(msPartialOpen - msPartialClose);
+  
   delay(100);
-  msPartialClose = runToLatch(false,3);
+  msOpen = runToLatch(true,0);
 
+  Serial.print(F("%latched closed to latched open   : "));
+  Serial.println(msOpen);
+  
   delay(100);
-  msOpen = runToLatch(true,3);
-
-  delay(100);
-  msClose = runToLatch(false,3);
-
-  updateCal(trainingGain, msPartialOpen, msPartialClose, msOpen, msClose);
+  msClose = runToLatch(false,0);
+  Serial.print(F("%latched open   to latched closed : "));
+  Serial.print(msClose);
+  Serial.print(F("\tdifference : "));
+  Serial.println(msOpen-msClose);
+  
+  updateCal(trainingGain, msPartialOpen, msPartialClose, msOpen, msClose,3);
 }
 
 byte clamp8(int p)
@@ -203,67 +268,56 @@ byte clamp8(int p)
   return((byte)p);
 }
 
+#define INV255 0.00392157f  // (1/255 == 0.003922)
+#define TwoOverPi  0.6366198f
+#define PiOverTwo  1.57071f
+
 int cmd2ms(const byte cmdByte, const int msSweep)
 {
-  static byte prev = 111;
-
+  int cmd = cmdByte;
+  if (cmd >= 255)
+    return(msSweep);
+  if (cmd <= 0)
+    return(0);
+  
   // let command [0..255] be proportional to amount of surface area blocking duct
-  float frac = ((float)cmdByte) * 0.003922f;  // (1/255)
-  if (frac < 0.01f)
-    frac = 0.0f;
-  if (frac > .999f)
-    frac = 0.999f;
+  float a = ((float)(255-cmd)) * INV255;
+  int ms = (int)(acos(a) * msSweep * TwoOverPi);
 
+  static byte prev = 111;
   if (cmdByte != prev)
     {
       Serial.print(F("Command Byte "));
       Serial.print((int)cmdByte);printTab();
-      Serial.print(frac,3);
+      Serial.print(a,3);
       Serial.print(F(" of area --> "));
+      Serial.print(ms);printSlash();
+      Serial.println(msSweep);
+      prev = cmdByte;
     }
-  
-  frac = asin(frac) / 1.57f;  // now fraction of sweep time
 
-  
-  if (cmdByte != prev)
-    {
-      Serial.print(frac,3);  Serial.print(F(" of sweep "));
-    }
-  
-  int ms = (int)(frac * msSweep);
-  if (ms < 20)
-    ms = 0;
-  if (ms > msSweep-30)
-    ms = msSweep + 20;
-
-  if (cmdByte != prev)
-    {
-      Serial.print(ms);printSlash();Serial.println(msSweep);
-    }
-  prev = cmdByte;
   return(ms);
 }
 byte ms2cmd(const int ms, const int msSweep)
 {
-  static int prev = -99;
+  if (ms <= 0)
+    return((byte)0);
+  if (ms >= msSweep)
+    return((byte)255);
   
-  //long p = (255 * ms) / msSweep;
-
   // make proportional to surface area, assuming equal angular velocity with time
-  float ang = ( 1.571f * ((float)ms) ) / msSweep;
+  float ang = ( ((float)ms) * PiOverTwo ) / msSweep;
+  byte cmdByte = (byte)((int)(255.0f * (1.0f - cos(ang))));
 
-  byte cmdByte = (ang > 1.57f) ? ((byte)255) :
-    ((ang < 0.002f) ? ((byte)0) : ((byte)((int)(255.0f * sin(ang)))) );
-
+  static int prev = -99;
   if (ms != prev)
     {
       Serial.print(ms);printSlash();Serial.print(msSweep);
       Serial.print(F(" --> "));
       Serial.print(ang,3);Serial.print(F("rad  Cmd Byte : "));
       Serial.println((int)cmdByte);
+      prev = ms;
     }
-  
-  prev = ms;
   return(cmdByte);
 }
 
@@ -484,7 +538,7 @@ int DamperControl::runToLatch(const bool open, const byte verbose)
 {
   if (open)
     {
-      Serial.println(F("Reset damper to closed before attempting to open."));
+      Serial.println(F("%Home damper closed before open to latch."));
       runToLatch(false,verbose);
     }
 

@@ -69,9 +69,9 @@ public:
     _pinSens = sensPin;
     _pinSwitch = switchPin;
 
-    pinMode(_pinEnable,OUTPUT);
-    pinMode(_pinSwitch,OUTPUT);
-    pinMode(_pinSens,INPUT);
+    //pinMode(_pinEnable,OUTPUT);
+    //pinMode(_pinSwitch,OUTPUT);
+    //pinMode(_pinSens,INPUT);
   }
 
   // provides consistent interface weather or not logic is inverted
@@ -86,12 +86,18 @@ public:
     // Just set relay to close after motion stops, no matter
     // which direction
     if (!s)
-      setOpen(false);  // always set to "close" mode after motion stops
+      {
+	delay(100);
+        setOpen(false);  // always set to "close" mode after motion stops
+      }
   }
 
   void begin() {
+    pinMode(_pinEnable,OUTPUT);
+    pinMode(_pinSwitch,OUTPUT);
+    pinMode(_pinSens,INPUT);
     move(false);  // make sure not enabled
-  } 
+  }
 
   int sens() { return(analogRead(_pinSens)); }
 
@@ -109,36 +115,54 @@ public:
 class DamperControl : public DamperBase
 {
  public:
+  DamperControl();
   DamperControl(const int enablePin, const int relayPin, const int sensPin);
+  void     init(const int enablePin, const int relayPin, const int sensPin);
   void init();  // re-initialize unit, in closed position
+  void calibrate(const float trainingGain=0.0f);  // [0,1] --> 0==no training...blend...  1==ignore old values
   const byte getCmd(); // current desired position.  0==closed.  255==open
   const byte getPos(); // current estimated position, 0..255
   void cmd(const byte pos);  // request to move to this position 0..255
   void flush();  // force move to current requested position
 
-  long _accum;  // current state, as accumulated msec
-  long _cmd;  // current desired position, 0..._accum
-  long _hyst;   // threshold to command servo to get _accum close to _cmd (msec)
-  long _hystToOpen;  // time to start opening from closed (msec)
-  long _backlash;  // this many msec to reverse direction (backlash)
-  
-  long _toToggle; // msec to sweep open to close
-  // this is same as mset to get from clost to open AFTER _hystToOpen
+  // NOTE:  int on AVR is 16 bit.  If sweep might get above 15 seconds,
+  //        change these to long!!!
+  int _msSweep; // msec to sweep open to close
+  // Assert : this is same as time to get from close to open AFTER _msBacklashOpen
 
-  // expected sensor counts when latched, open and closed
-  long _latchedOpen, _latchedClosed;
+  int _msAccum;  // current state, as accumulated sweep msec
+  int _msCmd;    // current desired position, 0..._msSweep
 
-  // give yourself some extra time to latch after move
-  long _toggleFuzz;
+
+  int _msHyst;   // try to synch _msAccum to _msCmd if difference larter than this
+  int _msBacklashOpen;  // time to start opening from closed (msec)
+  int _msBacklash;  // this many msec to reverse direction from opening to closing
+
+  // new circuit... nearly 0 counts when latched, as expected.
+  // don't need this any more:
+  //// expected sensor counts when latched, open and closed
+  //long _latchedOpen, _latchedClosed;
+
+  // Time needed to detect latch after sweep
+  int _msLatch;
+
+  int _latchThresh;  // less than this many counts when damper is latched open or closed
 
  protected:
   bool _opening;  // if last move was opening, set this so we know if we need to accomodate backlash
   void update();  // check command to see if position reset is necessary
-  void setOpenFrac(const long openCount); // close, then set position
-  void moveTowardClose(const long cmd); // move from position toward closed
-  long runToLatch(const bool open = false, const byte verbose=0); // false to latch closed
-  //private:
-  //DamperControlPrivates priv;
+  void setOpenFrac(const int openCount); // close, then set position
+  void moveTowardClose(const int cmd); // move from position toward closed
+  int runToLatch(const bool open = false, const byte verbose=0); // false to latch closed
+  void setDefaultParameters();
+
+
+  void forcePartialOpen(const int ms);
+  void updateCal(const float trainingGain,
+		 const int msPartialOpen, const int msPartialClose,
+		 const int msOpen, const int msClose,
+		 const byte verbose=0);
+
 };
 
 /* notes on failed attempt to enable and sense current over a FET
